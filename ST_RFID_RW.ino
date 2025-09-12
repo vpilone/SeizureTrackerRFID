@@ -77,33 +77,80 @@ void loop() {
         {
           Serial.println("Unable to read the requested page!");
           uriFound = false;
+          //currrently, want to abort this loop as soon as the connection is lost
+          break;
         }
       }
     }
 
     //ask the user if they want to overwrite the card
-    Serial.println("Would you like to overwrite this card? (y/n)");
+    Serial.println("This card will be overwritten in 5 seconds, send a char to stop it.");
+    //variable to store response
+    //variable to track wait times
+    uint8_t response[8] = {0,0,0,0,0,0,0,0};
+    uint8_t delaySeconds = 5;
+
     Serial.flush();
     Serial.end();
     Serial.begin(115200);
-    uint8_t response[8];
-    while (!Serial.available());
+    //waits for a given amount of time before overwriting the device
+    while (!Serial.available() && delaySeconds > 0) {
+      delay(1000);
+      delaySeconds--;
+    }
     while (Serial.available()) {
     response[0] = Serial.read();
     }
 
-    //if y or Y, overwrite the card and display the success or failure
-    if (response[0] == 0x59 || response[0] == 0x79) {
+    //if not overriden, rewrites the device
+    if (response[0] == 0) {
+      //url variables
+      const char system[] = "seizuretracker.com";
+      const uint8_t systemSize = sizeof(system);
+      const char resourceLocation[] = "directory";
+      const uint8_t resourceLocationSize = sizeof(resourceLocation);
+      //url size size of above plus 5 random numbers and 2 "/" charecters, minus the null charecter at the end of the first variable
+      const uint8_t urlSize = systemSize + resourceLocationSize + 6;
+
+      //assemble url based on variables
+      char url[urlSize];
+      uint8_t currentPos = 0;
+
+      //adds the system first
+      while (currentPos < systemSize - 1) {
+        url[currentPos] = system[currentPos];
+        currentPos++;
+      }
+      url[currentPos] = '/';
+      currentPos++;
+
+      //adds a series of 5 random numbers
+      while (currentPos < systemSize + 5) {
+        url[currentPos] = char(random(48,58));
+        currentPos++;
+      }
+      url[currentPos] = '/';
+      currentPos++;
+
+      //adds the directory
+      while (currentPos < urlSize - 1) {
+        url[currentPos] = resourceLocation[currentPos - systemSize - 6];
+        currentPos++;
+      }
+      
       //write to card
-      char url[] = "seizuretracker.com";
       //uses https://www. as default protocol (aka 0x02)
-      uint8_t written = nfc.ntag2xx_WriteNDEFURI(0x02, url, userPages);
+      Serial.println(url);
+      uint8_t written = nfc.ntag2xx_WriteNDEFURI(0x02, url, userPages*4);
       if (written == 1) {
         Serial.println("Successfully wrote to device.");
       }
       else {
         Serial.println("Error writing to card.");
       }
+    }
+    else {
+      Serial.println("Didn't write to card.");
     }
     Serial.flush();
 
