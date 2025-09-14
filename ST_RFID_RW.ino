@@ -50,13 +50,14 @@ void loop() {
     nfc.PrintHex(uid, uidLength);
     Serial.println("");
 
+
     //boolean to find old URI/URL
     bool uriFound = false; 
 
+    if (uidLength == 7) {
+    //loop for each avalible page, starts on page 4 to avoid protected area
     //creates buffer for data
     uint8_t data[32];
-
-    //loop for each avalible page, starts on page 4 to avoid protected area
     for (uint8_t i = 3; i < 41; i++)
       {
         //attempts to read page
@@ -135,6 +136,67 @@ void loop() {
     }
     Serial.flush();
     }
+
+    //different methods for mifaire classic cards
+    //IMPORTANT: This code has to reformat all cards to write to them
+    else if (uidLength == 4) {
+      //loop for each avalible page, starts on page 4 to avoid protected area
+      //creates buffer for data
+      uint8_t data[16];
+      //for classics, authenticate first
+      Serial.println("Trying to authenticate block 4 with default KEYA value");
+      uint8_t keya[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+      success = nfc.mifareclassic_AuthenticateBlock(uid, uidLength, 0, 0, keya);
+      if (success) {
+          
+        //ask the user if they want to overwrite the card
+        Serial.println("This card will be overwritten in 5 seconds, send a char to stop it.");
+        //variable to store response
+        //variable to track wait times
+        uint8_t response[8] = {0,0,0,0,0,0,0,0};
+        uint8_t delaySeconds = 5;
+
+        Serial.flush();
+        Serial.end();
+        Serial.begin(115200);
+        //waits for a given amount of time before overwriting the device
+        while (!Serial.available() && delaySeconds > 0) {
+          delay(1000);
+          delaySeconds--;
+        }
+        while (Serial.available()) {
+        response[0] = Serial.read();
+        }
+
+        //if not overriden, rewrites the device
+        if (response[0] == 0) {
+          //write to card
+          //uses https://www. as default protocol (aka 0x02)
+          char url[urlSize];
+          assembleURL(url);
+          Serial.println(url);
+          nfc.mifareclassic_FormatNDEF();
+          char url2[] = "seizuretracker.com";
+          success = nfc.mifareclassic_AuthenticateBlock(uid, uidLength, 4, 0, keya);
+          if (!success)
+          {
+            Serial.println("Authentication failed.");
+          }
+          uint8_t written = nfc.mifareclassic_WriteNDEFURI(1, 0x02, url2);
+          if (written == 1) {
+            Serial.println("Successfully wrote to device.");
+          }
+          else {
+            Serial.println("Error writing to card.");
+          }
+        }
+        else {
+          Serial.println("Didn't write to card.");
+        }
+        Serial.flush();
+      }
+    }
+  }
 
     //ask to scan another card
     Serial.println("\n\nSend a character to scan another tag!");
