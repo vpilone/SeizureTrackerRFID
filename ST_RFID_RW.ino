@@ -5,11 +5,15 @@
 #define PN532_IRQ   (2)
 #define PN532_RESET (3)
 
+#define LED_PIN (13)
+
 //define Adafruit instance for IC2 connection
 Adafruit_PN532 nfc(PN532_IRQ, PN532_RESET);
 
 void setup(void) {
   //Begin Serial (has to be on 115200 to ensure read write functions)
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, HIGH);
   Serial.begin(115200);
 
   //Intial Output for Debugging
@@ -31,6 +35,7 @@ void loop() {
   success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength);
 
   if (success) {
+    digitalWrite(LED_PIN, LOW);
     //prints the UID (card tracking)
     Serial.print("  UID Length: ");Serial.print(uidLength, DEC);Serial.println(" bytes");
     Serial.print("  UID Value: ");
@@ -44,7 +49,7 @@ void loop() {
     uint8_t data[32];
 
     //loop for each avalible page, starts on page 4 to avoid protected area
-    for (uint8_t i = 3; i < 42; i++)
+    for (uint8_t i = 3; i < 41; i++)
       {
         //attempts to read page
         success = nfc.ntag2xx_ReadPage(i, data);
@@ -81,7 +86,7 @@ void loop() {
           break;
         }
       }
-    }
+    
 
     //ask the user if they want to overwrite the card
     Serial.println("This card will be overwritten in 5 seconds, send a char to stop it.");
@@ -153,12 +158,14 @@ void loop() {
       Serial.println("Didn't write to card.");
     }
     Serial.flush();
+    }
 
     //ask to scan another card
     Serial.println("\n\nSend a character to scan another tag!");
     Serial.flush();
     Serial.end();
     Serial.begin(115200);
+    digitalWrite(LED_PIN, HIGH);
     while (!Serial.available());
     while (Serial.available()) {
     Serial.read();
