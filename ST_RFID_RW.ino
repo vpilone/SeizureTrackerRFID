@@ -10,6 +10,14 @@
 //define Adafruit instance for IC2 connection
 Adafruit_PN532 nfc(PN532_IRQ, PN532_RESET);
 
+//url variables
+const char urlSystem[] = "seizuretracker.com";
+const uint8_t urlSystemSize = sizeof(urlSystem);
+const char resourceLocation[] = "directory";
+const uint8_t resourceLocationSize = sizeof(resourceLocation);
+//url size size of above plus 5 random numbers and 2 "/" charecters, minus the null charecter at the end of the first variable
+const uint8_t urlSize = urlSystemSize + resourceLocationSize + 6;
+
 void setup(void) {
   //Begin Serial (has to be on 115200 to ensure read write functions)
   pinMode(LED_PIN, OUTPUT);
@@ -109,42 +117,10 @@ void loop() {
 
     //if not overriden, rewrites the device
     if (response[0] == 0) {
-      //url variables
-      const char system[] = "seizuretracker.com";
-      const uint8_t systemSize = sizeof(system);
-      const char resourceLocation[] = "directory";
-      const uint8_t resourceLocationSize = sizeof(resourceLocation);
-      //url size size of above plus 5 random numbers and 2 "/" charecters, minus the null charecter at the end of the first variable
-      const uint8_t urlSize = systemSize + resourceLocationSize + 6;
-
-      //assemble url based on variables
-      char url[urlSize];
-      uint8_t currentPos = 0;
-
-      //adds the system first
-      while (currentPos < systemSize - 1) {
-        url[currentPos] = system[currentPos];
-        currentPos++;
-      }
-      url[currentPos] = '/';
-      currentPos++;
-
-      //adds a series of 5 random numbers
-      while (currentPos < systemSize + 5) {
-        url[currentPos] = char(random(48,58));
-        currentPos++;
-      }
-      url[currentPos] = '/';
-      currentPos++;
-
-      //adds the directory
-      while (currentPos < urlSize - 1) {
-        url[currentPos] = resourceLocation[currentPos - systemSize - 6];
-        currentPos++;
-      }
-      
       //write to card
       //uses https://www. as default protocol (aka 0x02)
+      char url[urlSize];
+      assembleURL(url);
       Serial.println(url);
       uint8_t written = nfc.ntag2xx_WriteNDEFURI(0x02, url, userPages*4);
       if (written == 1) {
@@ -172,3 +148,30 @@ void loop() {
     }
     Serial.flush();
   }
+
+void assembleURL(char* urlArray) {
+      //assemble url based on variables
+      uint8_t currentPos = 0;
+
+      //adds the system first
+      while (currentPos < urlSystemSize - 1) {
+        urlArray[currentPos] = urlSystem[currentPos];
+        currentPos++;
+      }
+      urlArray[currentPos] = '/';
+      currentPos++;
+
+      //adds a series of 5 random numbers
+      while (currentPos < urlSystemSize + 5) {
+        urlArray[currentPos] = char(random(48,58));
+        currentPos++;
+      }
+      urlArray[currentPos] = '/';
+      currentPos++;
+
+      //adds the directory
+      while (currentPos < urlSize - 1) {
+        urlArray[currentPos] = resourceLocation[currentPos - urlSystemSize - 6];
+        currentPos++;
+      }
+}
