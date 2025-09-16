@@ -2,10 +2,24 @@
 #include <Adafruit_PN532.h>
 
 //defining pins for I2C Shield connection (as per example)
-#define PN532_IRQ   (2)
+#define PN532_IRQ (2)
 #define PN532_RESET (3)
 
 #define LED_PIN (13)
+
+#define NR_SHORTSECTOR (32)          // Number of short sectors on Mifare 1K/4K
+#define NR_LONGSECTOR (8)            // Number of long sectors on Mifare 4K
+#define NR_BLOCK_OF_SHORTSECTOR (4)  // Number of blocks in a short sector
+#define NR_BLOCK_OF_LONGSECTOR (16)  // Number of blocks in a long sector
+
+// Determine the sector trailer block based on sector number
+#define BLOCK_NUMBER_OF_SECTOR_TRAILER(sector) (((sector) < NR_SHORTSECTOR) ? ((sector)*NR_BLOCK_OF_SHORTSECTOR + NR_BLOCK_OF_SHORTSECTOR - 1) : (NR_SHORTSECTOR * NR_BLOCK_OF_SHORTSECTOR + (sector - NR_SHORTSECTOR) * NR_BLOCK_OF_LONGSECTOR + NR_BLOCK_OF_LONGSECTOR - 1))
+
+// Determine the sector's first block based on the sector number
+#define BLOCK_NUMBER_OF_SECTOR_1ST_BLOCK(sector) (((sector) < NR_SHORTSECTOR) ? ((sector)*NR_BLOCK_OF_SHORTSECTOR) : (NR_SHORTSECTOR * NR_BLOCK_OF_SHORTSECTOR + (sector - NR_SHORTSECTOR) * NR_BLOCK_OF_LONGSECTOR))
+
+// The default Mifare Classic key
+static const uint8_t KEY_DEFAULT_KEYAB[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
 //define Adafruit instance for IC2 connection
 Adafruit_PN532 nfc(PN532_IRQ, PN532_RESET);
@@ -16,7 +30,7 @@ const uint8_t urlSystemSize = sizeof(urlSystem);
 const char resourceLocation[] = "directory";
 const uint8_t resourceLocationSize = sizeof(resourceLocation);
 //url size size of above plus 5 random numbers and 2 "/" charecters, minus the null charecter at the end of the first variable
-const uint8_t urlSize = urlSystemSize + resourceLocationSize + 6;
+const uint8_t urlSize = urlSystemSize + resourceLocationSize + 15;
 
 void setup(void) {
   //Begin Serial (has to be on 115200 to ensure read write functions)
@@ -33,8 +47,8 @@ void setup(void) {
 
 void loop() {
   //variable definition
-  uint8_t userPages = 0; //variable to track user pages for error checks
-  uint8_t success; //boolean to store if a card is found
+  uint8_t userPages = 0;                    //variable to track user pages for error checks
+  uint8_t success;                          //boolean to store if a card is found
   uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };  // Buffer to store the returned UID
   uint8_t uidLength;                        // Length of the UID (4 or 7 bytes depending on ISO14443A card type)
 
@@ -45,96 +59,82 @@ void loop() {
   if (success) {
     digitalWrite(LED_PIN, LOW);
     //prints the UID (card tracking)
-    Serial.print("  UID Length: ");Serial.print(uidLength, DEC);Serial.println(" bytes");
+    Serial.print("  UID Length: ");
+    Serial.print(uidLength, DEC);
+    Serial.println(" bytes");
     Serial.print("  UID Value: ");
     nfc.PrintHex(uid, uidLength);
     Serial.println("");
 
+    Serial.println("Tap the same card again to overwrite it.");
 
-    //boolean to find old URI/URL
-    bool uriFound = false; 
+    //variables for double tap feature
+    uint8_t tempuid[] = { 0, 0, 0, 0, 0, 0, 0 };  // Buffer to store the returned UID
+    uint8_t tempuidLength;
+    //max time in seconds *4
+    uint8_t maxSeconds = 10 * 4;
+
+    //wait until no card is found (card has been removed) or timeout
+    while (success && maxSeconds > 0) {
+      digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+      delay(250);
+      success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, tempuid, &tempuidLength, 250);
+      maxSeconds--;
+    }
+
+    //wait until card is refound or timeout
+    while (!success && maxSeconds > 0) {
+      digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+      delay(250);
+      success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, tempuid, &tempuidLength, 50);
+      maxSeconds--;
+    }
+
+    //check if the attempt timed out
+    if (maxSeconds < 1) {
+      Serial.println("Timeout, please tap the card.");
+      digitalWrite(LED_PIN, HIGH);
+      return;
+    } else if (!compareUID(uid, uidLength, tempuid, tempuidLength)) {
+      Serial.println("Please tap the same card to overwrite it.");
+      digitalWrite(LED_PIN, HIGH);
+      return;
+    } else {
+      digitalWrite(LED_PIN, LOW);
+    }
 
     if (uidLength == 7) {
-    //loop for each avalible page, starts on page 4 to avoid protected area
-    //creates buffer for data
-    uint8_t data[32];
-    for (uint8_t i = 3; i < 41; i++)
-      {
-        //attempts to read page
-        success = nfc.ntag2xx_ReadPage(i, data);
+      //loop for each avalible page, starts on page 4 to avoid protected area
+      //creates buffer for data
+      uint8_t data[32];
+      for (uint8_t i = 4; i < 39; i++) {
+        //attempts to erase page
+        success = nfc.ntag2xx_WritePage(i, data);
 
-        // Display the results, depending on 'success'
-        if (success)
-        {
+        // // Display the results, depending on 'success'
+        if (success) {
           userPages++;
-          //performs various actions based on state
-          for (uint8_t i = 0; i < 4; i++) {
-            //if the ending hex 0xFE is found, set uriFound to false;
-            if (data[i] == 0xFE) {
-              Serial.println(" ");
-              uriFound = false;
-            }
-            //if a uri has been found, print the next charecter
-            if (uriFound == true) {
-              Serial.print((char)data[i]);
-            }
-            //if a uri hasn't been found, check if the next charecter is the start of a uri
-            if (data[i] == 0x55 && uriFound == false) {
-              i = i + 1; //skips connection protocol hex
-              Serial.print("Old URI: ");
-              uriFound = true;
-            }
-          }
         }
         //catch lost connection error
-        else
-        {
+        else {
           Serial.println("Unable to read the requested page!");
-          uriFound = false;
           //currrently, want to abort this loop as soon as the connection is lost
           break;
         }
       }
-    
+      Serial.flush();
 
-    //ask the user if they want to overwrite the card
-    Serial.println("This card will be overwritten in 5 seconds, send a char to stop it.");
-    //variable to store response
-    //variable to track wait times
-    uint8_t response[8] = {0,0,0,0,0,0,0,0};
-    uint8_t delaySeconds = 5;
-
-    Serial.flush();
-    Serial.end();
-    Serial.begin(115200);
-    //waits for a given amount of time before overwriting the device
-    while (!Serial.available() && delaySeconds > 0) {
-      delay(1000);
-      delaySeconds--;
-    }
-    while (Serial.available()) {
-    response[0] = Serial.read();
-    }
-
-    //if not overriden, rewrites the device
-    if (response[0] == 0) {
-      //write to card
-      //uses https://www. as default protocol (aka 0x02)
+      //rewrites the device, using https://www. as default protocol (aka 0x02)
       char url[urlSize];
       assembleURL(url);
       Serial.println(url);
-      uint8_t written = nfc.ntag2xx_WriteNDEFURI(0x02, url, userPages*4);
+      uint8_t written = nfc.ntag2xx_WriteNDEFURI(0x02, url, userPages * 4);
       if (written == 1) {
         Serial.println("Successfully wrote to device.");
-      }
-      else {
+      } else {
         Serial.println("Error writing to card.");
       }
-    }
-    else {
-      Serial.println("Didn't write to card.");
-    }
-    Serial.flush();
+      Serial.flush();
     }
 
     //different methods for mifaire classic cards
@@ -143,97 +143,170 @@ void loop() {
       //loop for each avalible page, starts on page 4 to avoid protected area
       //creates buffer for data
       uint8_t data[16];
+
+      //reformat based on example code
+      success = mifaireclassic_ndeftoclassic();
+
+      //catch error with reformatting
+      if (!success) {
+        Serial.println("Something went wrong.");
+        return;
+      }
+
       //for classics, authenticate first
       Serial.println("Trying to authenticate block 4 with default KEYA value");
       uint8_t keya[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
       success = nfc.mifareclassic_AuthenticateBlock(uid, uidLength, 0, 0, keya);
       if (success) {
-          
-        //ask the user if they want to overwrite the card
-        Serial.println("This card will be overwritten in 5 seconds, send a char to stop it.");
-        //variable to store response
-        //variable to track wait times
-        uint8_t response[8] = {0,0,0,0,0,0,0,0};
-        uint8_t delaySeconds = 5;
-
         Serial.flush();
-        Serial.end();
-        Serial.begin(115200);
-        //waits for a given amount of time before overwriting the device
-        while (!Serial.available() && delaySeconds > 0) {
-          delay(1000);
-          delaySeconds--;
-        }
-        while (Serial.available()) {
-        response[0] = Serial.read();
-        }
 
-        //if not overriden, rewrites the device
-        if (response[0] == 0) {
-          //write to card
-          //uses https://www. as default protocol (aka 0x02)
-          char url[urlSize];
-          assembleURL(url);
-          Serial.println(url);
-          nfc.mifareclassic_FormatNDEF();
-          char url2[] = "seizuretracker.com";
-          success = nfc.mifareclassic_AuthenticateBlock(uid, uidLength, 4, 0, keya);
-          if (!success)
-          {
-            Serial.println("Authentication failed.");
-          }
-          uint8_t written = nfc.mifareclassic_WriteNDEFURI(1, 0x02, url2);
-          if (written == 1) {
-            Serial.println("Successfully wrote to device.");
-          }
-          else {
-            Serial.println("Error writing to card.");
-          }
+        //write to card
+        //uses https://www. as default protocol (aka 0x02)
+        char url[urlSize];
+        assembleURL(url);
+        Serial.println(url);
+        nfc.mifareclassic_FormatNDEF();
+        //better url def
+        // char url2[] = "seizuretracker.com?RFID=123456789012345";
+        char url2[] = "seizuretracker.com";
+        success = nfc.mifareclassic_AuthenticateBlock(uid, uidLength, 4, 0, keya);
+        if (!success) {
+          Serial.println("Authentication failed.");
         }
-        else {
-          Serial.println("Didn't write to card.");
+        uint8_t written = nfc.mifareclassic_WriteNDEFURI(1, 0x02, url2);
+        if (written == 1) {
+          Serial.println("Successfully wrote to device.");
+        } else {
+          Serial.println("Error writing to card.");
         }
         Serial.flush();
       }
     }
   }
 
-    //ask to scan another card
-    Serial.println("\n\nSend a character to scan another tag!");
-    Serial.flush();
-    Serial.end();
-    Serial.begin(115200);
-    digitalWrite(LED_PIN, HIGH);
-    while (!Serial.available());
-    while (Serial.available()) {
-    Serial.read();
-    }
-    Serial.flush();
+  //prep to scan another card
+  Serial.flush();
+  for (uint8_t i = 0; i < 3 * 4; i++) {
+    digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+    delay(250);
   }
+  digitalWrite(LED_PIN, HIGH);
+}
 
+//method to assemble the url
 void assembleURL(char* urlArray) {
-      //assemble url based on variables
-      uint8_t currentPos = 0;
+  uint8_t currentPos = 0;
 
-      //adds the system first
-      while (currentPos < urlSystemSize - 1) {
-        urlArray[currentPos] = urlSystem[currentPos];
-        currentPos++;
-      }
-      urlArray[currentPos] = '/';
-      currentPos++;
+  //adds the system first
+  while (currentPos < urlSystemSize - 1) {
+    urlArray[currentPos] = urlSystem[currentPos];
+    currentPos++;
+  }
+  urlArray[currentPos] = '/';
+  currentPos++;
 
-      //adds a series of 5 random numbers
-      while (currentPos < urlSystemSize + 5) {
-        urlArray[currentPos] = char(random(48,58));
-        currentPos++;
-      }
-      urlArray[currentPos] = '/';
-      currentPos++;
+  //adds a series of 5 random numbers
+  while (currentPos < urlSystemSize + 14) {
+    urlArray[currentPos] = char(random(48, 58));
+    currentPos++;
+  }
+  urlArray[currentPos] = '/';
+  currentPos++;
 
-      //adds the directory
-      while (currentPos < urlSize - 1) {
-        urlArray[currentPos] = resourceLocation[currentPos - urlSystemSize - 6];
-        currentPos++;
+  //adds the directory
+  while (currentPos < urlSize - 1) {
+    urlArray[currentPos] = resourceLocation[currentPos - urlSystemSize - 6];
+    currentPos++;
+  }
+}
+
+//method to compare two UID
+bool compareUID(uint8_t* uid1, uint8_t uid1Length, uint8_t* uid2, uint8_t uid2Length) {
+  if (uid1Length != uid2Length) {
+    return false;
+  }
+
+  for (uint8_t i = 0; i < uid1Length; i++) {
+    if (uid1[i] != uid2[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+//method to format mifaireclassic cards
+//0 means error, 1 means success
+uint8_t mifaireclassic_ndeftoclassic() {
+  uint8_t success;                          // Flag to check if there was an error with the PN532
+  uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };  // Buffer to store the returned UID
+  uint8_t uidLength;                        // Length of the UID (4 or 7 bytes depending on ISO14443A card type)
+  uint8_t blockBuffer[16];                  // Buffer to store block contents
+  uint8_t blankAccessBits[3] = { 0xff, 0x07, 0x80 };
+  uint8_t idx = 0;
+  uint8_t numOfSector = 16;  // Assume Mifare Classic 1K for now (16 4-block sectors)
+
+  success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength);
+
+  for (idx = 0; idx < numOfSector; idx++) {
+    // Step 1: Authenticate the current sector using key B 0xFF 0xFF 0xFF 0xFF 0xFF 0xFF
+    success = nfc.mifareclassic_AuthenticateBlock(uid, uidLength, BLOCK_NUMBER_OF_SECTOR_TRAILER(idx), 1, (uint8_t*)KEY_DEFAULT_KEYAB);
+    if (!success) {
+      Serial.print("Authentication failed for sector ");
+      Serial.println(numOfSector);
+      return 0;
+    }
+
+    // Step 2: Write to the other blocks
+    if (idx == 16) {
+      memset(blockBuffer, 0, sizeof(blockBuffer));
+      if (!(nfc.mifareclassic_WriteDataBlock((BLOCK_NUMBER_OF_SECTOR_TRAILER(idx)) - 3, blockBuffer))) {
+        Serial.print("Unable to write to sector ");
+        Serial.println(numOfSector);
+        return 0;
       }
+    }
+    if ((idx == 0) || (idx == 16)) {
+      memset(blockBuffer, 0, sizeof(blockBuffer));
+      if (!(nfc.mifareclassic_WriteDataBlock((BLOCK_NUMBER_OF_SECTOR_TRAILER(idx)) - 2, blockBuffer))) {
+        Serial.print("Unable to write to sector ");
+        Serial.println(numOfSector);
+        return 0;
+      }
+    } else {
+      memset(blockBuffer, 0, sizeof(blockBuffer));
+      if (!(nfc.mifareclassic_WriteDataBlock((BLOCK_NUMBER_OF_SECTOR_TRAILER(idx)) - 3, blockBuffer))) {
+        Serial.print("Unable to write to sector ");
+        Serial.println(numOfSector);
+        return 0;
+      }
+      if (!(nfc.mifareclassic_WriteDataBlock((BLOCK_NUMBER_OF_SECTOR_TRAILER(idx)) - 2, blockBuffer))) {
+        Serial.print("Unable to write to sector ");
+        Serial.println(numOfSector);
+        return 0;
+      }
+    }
+    memset(blockBuffer, 0, sizeof(blockBuffer));
+    if (!(nfc.mifareclassic_WriteDataBlock((BLOCK_NUMBER_OF_SECTOR_TRAILER(idx)) - 1, blockBuffer))) {
+      Serial.print("Unable to write to sector ");
+      Serial.println(numOfSector);
+      return 0;
+    }
+
+    // Step 3: Reset both keys to 0xFF 0xFF 0xFF 0xFF 0xFF 0xFF
+    memcpy(blockBuffer, KEY_DEFAULT_KEYAB, sizeof(KEY_DEFAULT_KEYAB));
+    memcpy(blockBuffer + 6, blankAccessBits, sizeof(blankAccessBits));
+    blockBuffer[9] = 0x69;
+    memcpy(blockBuffer + 10, KEY_DEFAULT_KEYAB, sizeof(KEY_DEFAULT_KEYAB));
+
+    // Step 4: Write the trailer block
+    if (!(nfc.mifareclassic_WriteDataBlock((BLOCK_NUMBER_OF_SECTOR_TRAILER(idx)), blockBuffer))) {
+      Serial.print("Unable to write trailer block of sector ");
+      Serial.println(numOfSector);
+      return 0;
+    }
+  }
+  Serial.println("\n\nDone!");
+  delay(1000);
+  Serial.flush();
+  return 1;
 }
