@@ -25,12 +25,12 @@ static const uint8_t KEY_DEFAULT_KEYAB[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
 Adafruit_PN532 nfc(PN532_IRQ, PN532_RESET);
 
 //url variables
-const char urlSystem[] = "seizuretracker.com";
+const char urlSystem[] = "uidev.seizuretracker.com";
 const uint8_t urlSystemSize = sizeof(urlSystem);
-const char resourceLocation[] = "directory";
-const uint8_t resourceLocationSize = sizeof(resourceLocation);
-//url size size of above plus 5 random numbers and 2 "/" charecters, minus the null charecter at the end of the first variable
-const uint8_t urlSize = urlSystemSize + resourceLocationSize + 15;
+const char variableSystem[] = "RFID?ID=";
+const uint8_t variableSystemSize = sizeof(variableSystem);
+//url size size of above plus 15 random charecters and 1 "/" charecters, minus the null charecter at the end of the first variable
+const uint8_t urlSize = urlSystemSize + variableSystemSize + 15;
 
 void setup(void) {
   //Begin Serial (has to be on 115200 to ensure read write functions)
@@ -107,11 +107,12 @@ void loop() {
       //loop for each avalible page, starts on page 4 to avoid protected area
       //creates buffer for data
       uint8_t data[32];
-      for (uint8_t i = 4; i < 39; i++) {
-        //attempts to erase page
-        success = nfc.ntag2xx_WritePage(i, data);
+      for (uint8_t i = 4; i < 35; i++) {
+        // //attempts to erase page
+        memset(data, 0, 4);
+        success = nfc.mifareultralight_WritePage(i, data);
 
-        // // Display the results, depending on 'success'
+        // // // Display the results, depending on 'success'
         if (success) {
           userPages++;
         }
@@ -128,7 +129,8 @@ void loop() {
       char url[urlSize];
       assembleURL(url);
       Serial.println(url);
-      uint8_t written = nfc.ntag2xx_WriteNDEFURI(0x02, url, userPages * 4);
+      //uint8_t written = nfc.mifareultralight_WritePage(uint8_t page, uint8_t *data)
+      uint8_t written = nfc.ntag2xx_WriteNDEFURI(0x04, url, userPages * 4);
       if (written == 1) {
         Serial.println("Successfully wrote to device.");
       } else {
@@ -165,15 +167,16 @@ void loop() {
         char url[urlSize];
         assembleURL(url);
         Serial.println(url);
-        nfc.mifareclassic_FormatNDEF();
-        //better url def
-        // char url2[] = "seizuretracker.com?RFID=123456789012345";
-        char url2[] = "seizuretracker.com";
+        success = nfc.mifareclassic_FormatNDEF();
+        if (!success) {
+          Serial.println("Failed to reformat");
+        }
         success = nfc.mifareclassic_AuthenticateBlock(uid, uidLength, 4, 0, keya);
         if (!success) {
           Serial.println("Authentication failed.");
         }
-        uint8_t written = nfc.mifareclassic_WriteNDEFURI(1, 0x02, url2);
+        char url2[] = "uidev.seizuretracker.com/RFID?ID=33203";
+        uint8_t written = nfc.mifareclassic_WriteNDEFURI(1, 0x04, url2);
         if (written == 1) {
           Serial.println("Successfully wrote to device.");
         } else {
@@ -205,19 +208,19 @@ void assembleURL(char* urlArray) {
   urlArray[currentPos] = '/';
   currentPos++;
 
-  //adds a series of 5 random numbers
-  while (currentPos < urlSystemSize + 14) {
+  //adds the variable system
+  while (currentPos < urlSize - 16) {
+    urlArray[currentPos] = variableSystem[currentPos - urlSystemSize];
+    currentPos++;
+  }
+
+  //adds a series of 15 random numbers
+  while (currentPos < urlSize - 1) {
     urlArray[currentPos] = char(random(48, 58));
     currentPos++;
   }
-  urlArray[currentPos] = '/';
-  currentPos++;
 
-  //adds the directory
-  while (currentPos < urlSize - 1) {
-    urlArray[currentPos] = resourceLocation[currentPos - urlSystemSize - 6];
-    currentPos++;
-  }
+  urlArray[currentPos] = 0x00;
 }
 
 //method to compare two UID
@@ -310,3 +313,98 @@ uint8_t mifaireclassic_ndeftoclassic() {
   Serial.flush();
   return 1;
 }
+
+//mifare classic write URI (modified to support longer URI)
+// uint8_t mifareclassic_WriteNDEFURI(uint8_t sectorNumber,
+//                                                    uint8_t uriIdentifier,
+//                                                    const char* url) {
+//   // Figure out how long the string is
+//   uint8_t len = strlen(url);
+
+//   // Make sure we're within a 1K limit for the sector number
+//   if ((sectorNumber < 1) || (sectorNumber > 15))
+//     return 0;
+
+//   // Make sure the URI payload is between 1 and 54 chars
+//   if ((len < 1) || (len > 54))
+//     return 0;
+
+//   // Note 0xD3 0xF7 0xD3 0xF7 0xD3 0xF7 must be used for key A
+//   // in NDEF records
+
+//   // Setup the sector buffer (w/pre-formatted TLV wrapper and NDEF message)
+//   uint8_t sectorbuffer1[16] = { 0x00,
+//                                 0x00,
+//                                 0x03,
+//                                 (uint8_t)(len + 5),
+//                                 0xD1,
+//                                 0x01,
+//                                 (uint8_t)(len + 1),
+//                                 0x55,
+//                                 uriIdentifier,
+//                                 0x00,
+//                                 0x00,
+//                                 0x00,
+//                                 0x00,
+//                                 0x00,
+//                                 0x00,
+//                                 0x00 };
+//   uint8_t sectorbuffer2[16] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+//                                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+//   uint8_t sectorbuffer3[16] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+//                                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+//   uint8_t sectorbuffer4[16] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+//                                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+//   uint8_t sectorbuffer5[16] = { 0xD3, 0xF7, 0xD3, 0xF7, 0xD3, 0xF7, 0x7F, 0x07,
+//                                 0x88, 0x40, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+//   if (len <= 6) {
+//     // Unlikely we'll get a url this short, but why not ...
+//     memcpy(sectorbuffer1 + 9, url, len);
+//     sectorbuffer1[len + 9] = 0xFE;
+//   } else if (len == 7) {
+//     // 0xFE needs to be wrapped around to next block
+//     memcpy(sectorbuffer1 + 9, url, len);
+//     sectorbuffer2[0] = 0xFE;
+//   } else if ((len > 7) && (len <= 22)) {
+//     // Url fits in two blocks
+//     memcpy(sectorbuffer1 + 9, url, 7);
+//     memcpy(sectorbuffer2, url + 7, len - 7);
+//     sectorbuffer2[len - 7] = 0xFE;
+//   } else if ((len > 22) && (len <= 37)) {
+//     // url fits in three block
+//     memcpy(sectorbuffer1 + 9, url, 7);
+//     memcpy(sectorbuffer2, url + 7, len - 7);
+//     sectorbuffer3[0] = 0xFE;
+//   } else if (len == 38) {
+//     // 0xFE needs to be wrapped around to final block
+//     memcpy(sectorbuffer1 + 9, url, 7);
+//     memcpy(sectorbuffer2, url + 7, 16);
+//     memcpy(sectorbuffer3, url + 23, len - 24);
+//     sectorbuffer4[len-24] = 0xFE;
+//   } else {
+//     // Url fits in four blocks
+//     memcpy(sectorbuffer1 + 9, url, 7);
+//     memcpy(sectorbuffer2, url + 7, 16);
+//     memcpy(sectorbuffer3, url + 23, 16);
+//     memcpy(sectorbuffer4, url + 38, len - 39);
+//     sectorbuffer4[len - 37] = 0xFE;
+//   }
+
+//   // Now write all four blocks back to the card
+//   if (!(nfc.mifareclassic_WriteDataBlock(sectorNumber * 4, sectorbuffer1)))
+//     return 0;
+//   if (!(nfc.mifareclassic_WriteDataBlock((sectorNumber * 4) + 1, sectorbuffer2)))
+//     return 0;
+//   if (!(nfc.mifareclassic_WriteDataBlock((sectorNumber * 4) + 2, sectorbuffer3)))
+//     return 0;
+//   if (!(nfc.mifareclassic_WriteDataBlock((sectorNumber * 4) + 3, sectorbuffer4)))
+//     return 0;
+
+//   // Seems that everything was OK (?!)
+//   return 1;
+// }
+
+// uint8_t mifareultralight_WriteNDEFURI() {
+  
+//}
+
