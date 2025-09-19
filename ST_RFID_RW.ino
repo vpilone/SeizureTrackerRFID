@@ -5,7 +5,9 @@
 #define PN532_IRQ (2)
 #define PN532_RESET (3)
 
-#define LED_PIN (13)
+#define LEDR_PIN (13)
+#define LEDG_PIN (12)
+#define LEDB_PIN (11)
 
 #define NR_SHORTSECTOR (32)          // Number of short sectors on Mifare 1K/4K
 #define NR_LONGSECTOR (8)            // Number of long sectors on Mifare 4K
@@ -32,10 +34,15 @@ const uint8_t variableSystemSize = sizeof(variableSystem);
 //url size size of above plus 15 random charecters and 1 "/" charecters, minus the null charecter at the end of the first variable
 const uint8_t urlSize = urlSystemSize + variableSystemSize + 15;
 
+//formatting variables (designed for mifare ultralight EV1 128b)
+uint8_t formattingData[32] = {0xE1, 0x10, 0x10, 0x00};
+
 void setup(void) {
   //Begin Serial (has to be on 115200 to ensure read write functions)
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, HIGH);
+  pinMode(LEDR_PIN, OUTPUT);
+  pinMode(LEDG_PIN, OUTPUT);
+  pinMode(LEDB_PIN, OUTPUT);
+  digitalWrite(LEDG_PIN, HIGH);
   Serial.begin(115200);
 
   //Intial Output for Debugging
@@ -57,7 +64,8 @@ void loop() {
   success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength);
 
   if (success) {
-    digitalWrite(LED_PIN, LOW);
+    analogWrite(LEDG_PIN, LOW);
+    digitalWrite(LEDR_PIN, LOW);
     //prints the UID (card tracking)
     Serial.print("  UID Length: ");
     Serial.print(uidLength, DEC);
@@ -76,7 +84,8 @@ void loop() {
 
     //wait until no card is found (card has been removed) or timeout
     while (success && maxSeconds > 0) {
-      digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+      analogWrite(LEDG_PIN, !digitalRead(LEDR_PIN) * 100);
+      digitalWrite(LEDR_PIN, !digitalRead(LEDR_PIN));
       delay(250);
       success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, tempuid, &tempuidLength, 250);
       maxSeconds--;
@@ -84,7 +93,8 @@ void loop() {
 
     //wait until card is refound or timeout
     while (!success && maxSeconds > 0) {
-      digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+      analogWrite(LEDG_PIN, !digitalRead(LEDR_PIN) * 100);
+      digitalWrite(LEDR_PIN, !digitalRead(LEDR_PIN));
       delay(250);
       success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, tempuid, &tempuidLength, 50);
       maxSeconds--;
@@ -93,20 +103,40 @@ void loop() {
     //check if the attempt timed out
     if (maxSeconds < 1) {
       Serial.println("Timeout, please tap the card.");
-      digitalWrite(LED_PIN, HIGH);
       return;
     } else if (!compareUID(uid, uidLength, tempuid, tempuidLength)) {
       Serial.println("Please tap the same card to overwrite it.");
-      digitalWrite(LED_PIN, HIGH);
+      //throw error
+      ledError();
       return;
     } else {
-      digitalWrite(LED_PIN, LOW);
+      digitalWrite(LEDR_PIN, HIGH);
+      analogWrite(LEDG_PIN, 100);
     }
 
     if (uidLength == 7) {
       //loop for each avalible page, starts on page 4 to avoid protected area
       //creates buffer for data
       uint8_t data[32];
+
+      //checks if the card has been formatted
+      success = nfc.mifareultralight_ReadPage(3, data);
+      if (success) {
+        if (data[0] == 0xE1 && data[1] == 0x10)
+        {
+          Serial.println("Card has been formatted.");
+        }
+        else if (data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x00 && data[3] == 0x00) {
+          Serial.println("Card will be formatted.");
+          nfc.mifareultralight_WritePage(3, formattingData);
+        }
+        else {
+          Serial.println("Card has been formatted incorrectly.");
+          ledError();
+          return;
+        }
+      }
+
       for (uint8_t i = 4; i < 35; i++) {
         // //attempts to erase page
         memset(data, 0, 4);
@@ -135,6 +165,8 @@ void loop() {
         Serial.println("Successfully wrote to device.");
       } else {
         Serial.println("Error writing to card.");
+        ledError();
+        return;
       }
       Serial.flush();
     }
@@ -152,6 +184,7 @@ void loop() {
       //catch error with reformatting
       if (!success) {
         Serial.println("Something went wrong.");
+        ledError();
         return;
       }
 
@@ -170,17 +203,22 @@ void loop() {
         success = nfc.mifareclassic_FormatNDEF();
         if (!success) {
           Serial.println("Failed to reformat");
+          ledError();
+          return;
         }
         success = nfc.mifareclassic_AuthenticateBlock(uid, uidLength, 4, 0, keya);
         if (!success) {
           Serial.println("Authentication failed.");
+          ledError();
+          return;
         }
-        char url2[] = "uidev.seizuretracker.com/RFID?ID=33203";
-        uint8_t written = nfc.mifareclassic_WriteNDEFURI(1, 0x04, url2);
+        uint8_t written = nfc.mifareclassic_WriteNDEFURI(1, 0x04, url);
         if (written == 1) {
           Serial.println("Successfully wrote to device.");
         } else {
           Serial.println("Error writing to card.");
+          ledError();
+          return;
         }
         Serial.flush();
       }
@@ -188,12 +226,15 @@ void loop() {
   }
 
   //prep to scan another card
+  digitalWrite(LEDR_PIN, LOW);
   Serial.flush();
-  for (uint8_t i = 0; i < 3 * 4; i++) {
-    digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+  for (uint8_t i = 0; i < 3 * 2; i++) {
+    analogWrite(LEDG_PIN, 255);
+    delay(250);
+    analogWrite(LEDG_PIN, 0);
     delay(250);
   }
-  digitalWrite(LED_PIN, HIGH);
+  analogWrite(LEDG_PIN, 255);
 }
 
 //method to assemble the url
@@ -205,6 +246,7 @@ void assembleURL(char* urlArray) {
     urlArray[currentPos] = urlSystem[currentPos];
     currentPos++;
   }
+
   urlArray[currentPos] = '/';
   currentPos++;
 
@@ -214,11 +256,33 @@ void assembleURL(char* urlArray) {
     currentPos++;
   }
 
+  urlArray[currentPos] = 'R';
+  currentPos++;
+
+  urlArray[currentPos] = 'F';
+  currentPos++;
+
   //adds a series of 15 random numbers
-  while (currentPos < urlSize - 1) {
-    urlArray[currentPos] = char(random(48, 58));
+  while (currentPos < urlSize - 3) {
+    uint8_t randAlphaNum = random(1, 63);
+    if (randAlphaNum < 11) {
+      randAlphaNum += 47;
+    }
+    else if (randAlphaNum > 10 && randAlphaNum < 37) {
+      randAlphaNum += 54;
+    }
+    else {
+      randAlphaNum += 60;
+    }
+    urlArray[currentPos] = char(randAlphaNum);
     currentPos++;
   }
+
+  urlArray[currentPos] = 'I';
+  currentPos++;
+
+  urlArray[currentPos] = 'D';
+  currentPos++;
 
   urlArray[currentPos] = 0x00;
 }
@@ -312,6 +376,17 @@ uint8_t mifaireclassic_ndeftoclassic() {
   delay(1000);
   Serial.flush();
   return 1;
+}
+
+void ledError() {
+  analogWrite(LEDG_PIN, 0);
+  delay(250);
+  for (uint8_t i = 0; i < 15 * 4; i++) {
+    digitalWrite(LEDR_PIN, !digitalRead(LEDR_PIN));
+    delay(250);
+  }
+  digitalWrite(LEDR_PIN, 0);
+  analogWrite(LEDG_PIN, 255);
 }
 
 //mifare classic write URI (modified to support longer URI)
