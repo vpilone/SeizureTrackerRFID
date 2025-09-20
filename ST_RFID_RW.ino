@@ -1,6 +1,21 @@
 //Adafruit PN532 Library
 #include <Adafruit_PN532.h>
 
+// Include the RTC library
+#include "RTC.h"
+
+//Include the NTP library
+#include <NTPClient.h>
+
+#if defined(ARDUINO_PORTENTA_C33)
+#include <WiFiC3.h>
+#elif defined(ARDUINO_UNOWIFIR4)
+#include <WiFiS3.h>
+#endif
+
+#include <WiFiUdp.h>
+#include "arduino_secrets.h"
+
 //defining pins for I2C Shield connection (as per example)
 #define PN532_IRQ (2)
 #define PN532_RESET (3)
@@ -23,6 +38,14 @@
 // The default Mifare Classic key
 static const uint8_t KEY_DEFAULT_KEYAB[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
+///////please enter your sensitive data in the Secret tab/arduino_secrets.h
+char ssid[] = SECRET_SSID;  // your network SSID (name)
+char pass[] = SECRET_PASS;  // your network password (use for WPA, or use as key for WEP)
+
+int wifiStatus = WL_IDLE_STATUS;
+WiFiUDP Udp;  // A UDP instance to let us send and receive packets over UDP
+NTPClient timeClient(Udp);
+
 //define Adafruit instance for IC2 connection
 Adafruit_PN532 nfc(PN532_IRQ, PN532_RESET);
 
@@ -32,21 +55,49 @@ const uint8_t urlSystemSize = sizeof(urlSystem);
 const char variableSystem[] = "RFID?ID=";
 const uint8_t variableSystemSize = sizeof(variableSystem);
 //url size size of above plus 15 random charecters and 1 "/" charecters, minus the null charecter at the end of the first variable
-const uint8_t urlSize = urlSystemSize + variableSystemSize + 15;
+const uint8_t urlSize = urlSystemSize + variableSystemSize + 16;
 
 //formatting variables (designed for mifare ultralight EV1 128b)
-uint8_t formattingData[32] = {0xE1, 0x10, 0x10, 0x00};
+uint8_t formattingData[32] = { 0xE1, 0x10, 0x10, 0x00 };
 
 void setup(void) {
   //Begin Serial (has to be on 115200 to ensure read write functions)
   pinMode(LEDR_PIN, OUTPUT);
   pinMode(LEDG_PIN, OUTPUT);
   pinMode(LEDB_PIN, OUTPUT);
-  digitalWrite(LEDG_PIN, HIGH);
+  digitalWrite(LEDB_PIN, HIGH);
   Serial.begin(115200);
+  while (!Serial)
+    ;
+
+  RTC.begin();
+  uint8_t success = connectToWiFi();
+  if (success) {
+    Serial.println("\nStarting connection to server...");
+    timeClient.begin();
+    timeClient.update();
+
+    // Get the current date and time from an NTP server and convert
+    // it to UTC +2 by passing the time zone offset in hours.
+    // You may change the time zone offset to your local one.
+    auto timeZoneOffsetHours = 0;
+    auto unixTime = timeClient.getEpochTime() + (timeZoneOffsetHours * 3600);
+    Serial.print("Unix time = ");
+    Serial.println(unixTime);
+    RTCTime timeToSet = RTCTime(unixTime);
+    RTC.setTime(timeToSet);
+  }
+
+  // Retrieve the date and time from the RTC and print them
+  RTCTime currentTime;
+  RTC.getTime(currentTime);
 
   //Intial Output for Debugging
   Serial.println("\n\nHello!");
+  Serial.println("The RTC is currently: " + String(currentTime));
+
+  digitalWrite(LEDB_PIN, LOW);
+  digitalWrite(LEDG_PIN, HIGH);
 
   //begin nfc connection
   nfc.begin();
@@ -103,6 +154,7 @@ void loop() {
     //check if the attempt timed out
     if (maxSeconds < 1) {
       Serial.println("Timeout, please tap the card.");
+      analogWrite(LEDG_PIN, 255);
       return;
     } else if (!compareUID(uid, uidLength, tempuid, tempuidLength)) {
       Serial.println("Please tap the same card to overwrite it.");
@@ -122,15 +174,12 @@ void loop() {
       //checks if the card has been formatted
       success = nfc.mifareultralight_ReadPage(3, data);
       if (success) {
-        if (data[0] == 0xE1 && data[1] == 0x10)
-        {
+        if (data[0] == 0xE1 && data[1] == 0x10) {
           Serial.println("Card has been formatted.");
-        }
-        else if (data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x00 && data[3] == 0x00) {
+        } else if (data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x00 && data[3] == 0x00) {
           Serial.println("Card will be formatted.");
           nfc.mifareultralight_WritePage(3, formattingData);
-        }
-        else {
+        } else {
           Serial.println("Card has been formatted incorrectly.");
           ledError();
           return;
@@ -251,7 +300,7 @@ void assembleURL(char* urlArray) {
   currentPos++;
 
   //adds the variable system
-  while (currentPos < urlSize - 16) {
+  while (currentPos < urlSize - 17) {
     urlArray[currentPos] = variableSystem[currentPos - urlSystemSize];
     currentPos++;
   }
@@ -262,21 +311,46 @@ void assembleURL(char* urlArray) {
   urlArray[currentPos] = 'F';
   currentPos++;
 
-  //adds a series of 15 random numbers
-  while (currentPos < urlSize - 3) {
+  //adds a series of 6 random numbers and 6 date numbers
+  while (currentPos < urlSize - 9) {
     uint8_t randAlphaNum = random(1, 63);
     if (randAlphaNum < 11) {
       randAlphaNum += 47;
-    }
-    else if (randAlphaNum > 10 && randAlphaNum < 37) {
+    } else if (randAlphaNum > 10 && randAlphaNum < 37) {
       randAlphaNum += 54;
-    }
-    else {
+    } else {
       randAlphaNum += 60;
     }
     urlArray[currentPos] = char(randAlphaNum);
     currentPos++;
   }
+
+  //get current date and add it to the end
+  RTCTime currentTime;
+  RTC.getTime(currentTime);
+  uint8_t curYear = currentTime.getYear() % 100;
+
+  urlArray[currentPos] = char(curYear/10 + 48);
+  currentPos++;
+
+  urlArray[currentPos] = (char)(curYear%10 + 48);
+  currentPos++;
+
+  uint8_t curMonth = Month2int(currentTime.getMonth());
+
+  urlArray[currentPos] = char(curMonth/10 + 48);
+  currentPos++;
+
+  urlArray[currentPos] = (char)(curMonth%10 + 48);
+  currentPos++;
+
+  uint8_t curDay = currentTime.getDayOfMonth();
+
+  urlArray[currentPos] = char(curDay/10 + 48);
+  currentPos++;
+
+  urlArray[currentPos] = (char)(curDay%10 + 48);
+  currentPos++;
 
   urlArray[currentPos] = 'I';
   currentPos++;
@@ -389,97 +463,62 @@ void ledError() {
   analogWrite(LEDG_PIN, 255);
 }
 
-//mifare classic write URI (modified to support longer URI)
-// uint8_t mifareclassic_WriteNDEFURI(uint8_t sectorNumber,
-//                                                    uint8_t uriIdentifier,
-//                                                    const char* url) {
-//   // Figure out how long the string is
-//   uint8_t len = strlen(url);
+void wifiError() {
+  digitalWrite(LEDB_PIN, HIGH);
+  for (uint8_t i = 0; i < 15 * 4; i++) {
+    digitalWrite(LEDB_PIN, !digitalRead(LEDB_PIN));
+    delay(250);
+  }
+  digitalWrite(LEDB_PIN, HIGH);
+}
 
-//   // Make sure we're within a 1K limit for the sector number
-//   if ((sectorNumber < 1) || (sectorNumber > 15))
-//     return 0;
+void printWifiStatus() {
+  // print the SSID of the network you're attached to:
+  Serial.print("SSID: ");
+  Serial.println(WiFi.SSID());
 
-//   // Make sure the URI payload is between 1 and 54 chars
-//   if ((len < 1) || (len > 54))
-//     return 0;
+  // print your board's IP address:
+  IPAddress ip = WiFi.localIP();
+  Serial.print("IP Address: ");
+  Serial.println(ip);
 
-//   // Note 0xD3 0xF7 0xD3 0xF7 0xD3 0xF7 must be used for key A
-//   // in NDEF records
+  // print the received signal strength:
+  long rssi = WiFi.RSSI();
+  Serial.print("signal strength (RSSI):");
+  Serial.print(rssi);
+  Serial.println(" dBm");
+}
 
-//   // Setup the sector buffer (w/pre-formatted TLV wrapper and NDEF message)
-//   uint8_t sectorbuffer1[16] = { 0x00,
-//                                 0x00,
-//                                 0x03,
-//                                 (uint8_t)(len + 5),
-//                                 0xD1,
-//                                 0x01,
-//                                 (uint8_t)(len + 1),
-//                                 0x55,
-//                                 uriIdentifier,
-//                                 0x00,
-//                                 0x00,
-//                                 0x00,
-//                                 0x00,
-//                                 0x00,
-//                                 0x00,
-//                                 0x00 };
-//   uint8_t sectorbuffer2[16] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-//                                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-//   uint8_t sectorbuffer3[16] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-//                                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-//   uint8_t sectorbuffer4[16] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-//                                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-//   uint8_t sectorbuffer5[16] = { 0xD3, 0xF7, 0xD3, 0xF7, 0xD3, 0xF7, 0x7F, 0x07,
-//                                 0x88, 0x40, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
-//   if (len <= 6) {
-//     // Unlikely we'll get a url this short, but why not ...
-//     memcpy(sectorbuffer1 + 9, url, len);
-//     sectorbuffer1[len + 9] = 0xFE;
-//   } else if (len == 7) {
-//     // 0xFE needs to be wrapped around to next block
-//     memcpy(sectorbuffer1 + 9, url, len);
-//     sectorbuffer2[0] = 0xFE;
-//   } else if ((len > 7) && (len <= 22)) {
-//     // Url fits in two blocks
-//     memcpy(sectorbuffer1 + 9, url, 7);
-//     memcpy(sectorbuffer2, url + 7, len - 7);
-//     sectorbuffer2[len - 7] = 0xFE;
-//   } else if ((len > 22) && (len <= 37)) {
-//     // url fits in three block
-//     memcpy(sectorbuffer1 + 9, url, 7);
-//     memcpy(sectorbuffer2, url + 7, len - 7);
-//     sectorbuffer3[0] = 0xFE;
-//   } else if (len == 38) {
-//     // 0xFE needs to be wrapped around to final block
-//     memcpy(sectorbuffer1 + 9, url, 7);
-//     memcpy(sectorbuffer2, url + 7, 16);
-//     memcpy(sectorbuffer3, url + 23, len - 24);
-//     sectorbuffer4[len-24] = 0xFE;
-//   } else {
-//     // Url fits in four blocks
-//     memcpy(sectorbuffer1 + 9, url, 7);
-//     memcpy(sectorbuffer2, url + 7, 16);
-//     memcpy(sectorbuffer3, url + 23, 16);
-//     memcpy(sectorbuffer4, url + 38, len - 39);
-//     sectorbuffer4[len - 37] = 0xFE;
-//   }
+uint8_t connectToWiFi() {
+  // check for the WiFi module:
+  if (WiFi.status() == WL_NO_MODULE) {
+    Serial.println("Communication with WiFi module failed!");
+    wifiError();
+    return 0;
+  }
 
-//   // Now write all four blocks back to the card
-//   if (!(nfc.mifareclassic_WriteDataBlock(sectorNumber * 4, sectorbuffer1)))
-//     return 0;
-//   if (!(nfc.mifareclassic_WriteDataBlock((sectorNumber * 4) + 1, sectorbuffer2)))
-//     return 0;
-//   if (!(nfc.mifareclassic_WriteDataBlock((sectorNumber * 4) + 2, sectorbuffer3)))
-//     return 0;
-//   if (!(nfc.mifareclassic_WriteDataBlock((sectorNumber * 4) + 3, sectorbuffer4)))
-//     return 0;
+  String fv = WiFi.firmwareVersion();
+  if (fv < WIFI_FIRMWARE_LATEST_VERSION) {
+    Serial.println("Please upgrade the firmware");
+  }
 
-//   // Seems that everything was OK (?!)
-//   return 1;
-// }
+  // attempt to connect to WiFi network:
+  Serial.print("Attempting to connect to SSID: ");
+  Serial.println(ssid);
+  // Connect to WPA/WPA2 network. Change this line if using open or WEP network:
+  wifiStatus = WiFi.begin(ssid, pass);
 
-// uint8_t mifareultralight_WriteNDEFURI() {
-  
-//}
+  // wait 10 seconds for connection:
+  delay(10000);
 
+  if (wifiStatus != WL_CONNECTED) {
+    Serial.println("Could not connect to wifi.");
+    wifiError();
+    return 0;
+  } else {
+
+    Serial.println("Connected to WiFi");
+    printWifiStatus();
+  }
+  return 1;
+}
