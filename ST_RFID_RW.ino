@@ -7,12 +7,14 @@
 //Include the NTP library
 #include <NTPClient.h>
 
+//Pick the correct wifi chip
 #if defined(ARDUINO_PORTENTA_C33)
 #include <WiFiC3.h>
 #elif defined(ARDUINO_UNOWIFIR4)
 #include <WiFiS3.h>
 #endif
 
+//Include the wifi library and network information
 #include <WiFiUdp.h>
 #include "arduino_secrets.h"
 
@@ -20,10 +22,12 @@
 #define PN532_IRQ (2)
 #define PN532_RESET (3)
 
+//defining LED RGB Pins
 #define LEDR_PIN (13)
 #define LEDG_PIN (12)
 #define LEDB_PIN (11)
 
+//Mifaire Classic Card Sizes
 #define NR_SHORTSECTOR (32)          // Number of short sectors on Mifare 1K/4K
 #define NR_LONGSECTOR (8)            // Number of long sectors on Mifare 4K
 #define NR_BLOCK_OF_SHORTSECTOR (4)  // Number of blocks in a short sector
@@ -54,24 +58,28 @@ const char urlSystem[] = "uidev.seizuretracker.com";
 const uint8_t urlSystemSize = sizeof(urlSystem);
 const char variableSystem[] = "RFID?ID=";
 const uint8_t variableSystemSize = sizeof(variableSystem);
-//url size size of above plus 15 random charecters and 1 "/" charecters, minus the null charecter at the end of the first variable
+//url size size of above plus 16 other charecters charecters and 1 "/" charecters, minus the null charecter at the end of the first variable
 const uint8_t urlSize = urlSystemSize + variableSystemSize + 16;
 
 //formatting variables (designed for mifare ultralight EV1 128b)
 uint8_t formattingData[32] = { 0xE1, 0x10, 0x10, 0x00 };
 
 void setup(void) {
-  //Begin Serial (has to be on 115200 to ensure read write functions)
+  //Setup LED and place into bootup mode (blue)
   pinMode(LEDR_PIN, OUTPUT);
   pinMode(LEDG_PIN, OUTPUT);
   pinMode(LEDB_PIN, OUTPUT);
   digitalWrite(LEDB_PIN, HIGH);
-  Serial.begin(115200);
-  while (!Serial)
-    ;
 
+  //Begin Serial (has to be on 115200 to ensure read write functions)
+  Serial.begin(115200);
+  while (!Serial);
+
+  //begin the RTC and attempt to connect to wifi
   RTC.begin();
   uint8_t success = connectToWiFi();
+  
+  //if connected, get the unix NTP time and update teh RTC
   if (success) {
     Serial.println("\nStarting connection to server...");
     timeClient.begin();
@@ -92,10 +100,20 @@ void setup(void) {
   RTCTime currentTime;
   RTC.getTime(currentTime);
 
+  //Error check to make sure the data didn't get garbled (happens occasionally)
+  if (currentTime.getYear() < 2025) {
+    ledError();
+    digitalWrite(LEDR_PIN, HIGH);
+    digitalWrite(LEDB_PIN, LOW);
+    digitalWrite(LEDG_PIN, LOW);
+    while(1);
+  }
+
   //Intial Output for Debugging
   Serial.println("\n\nHello!");
   Serial.println("The RTC is currently: " + String(currentTime));
 
+  //Place into ready mode
   digitalWrite(LEDB_PIN, LOW);
   digitalWrite(LEDG_PIN, HIGH);
 
@@ -115,8 +133,10 @@ void loop() {
   success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength);
 
   if (success) {
+    //Place into read/write mode
     analogWrite(LEDG_PIN, LOW);
     digitalWrite(LEDR_PIN, LOW);
+
     //prints the UID (card tracking)
     Serial.print("  UID Length: ");
     Serial.print(uidLength, DEC);
@@ -130,6 +150,7 @@ void loop() {
     //variables for double tap feature
     uint8_t tempuid[] = { 0, 0, 0, 0, 0, 0, 0 };  // Buffer to store the returned UID
     uint8_t tempuidLength;
+
     //max time in seconds *4
     uint8_t maxSeconds = 10 * 4;
 
@@ -142,7 +163,7 @@ void loop() {
       maxSeconds--;
     }
 
-    //wait until card is refound or timeout
+    //wait until card is tapped again or timeout
     while (!success && maxSeconds > 0) {
       analogWrite(LEDG_PIN, !digitalRead(LEDR_PIN) * 100);
       digitalWrite(LEDR_PIN, !digitalRead(LEDR_PIN));
@@ -156,16 +177,22 @@ void loop() {
       Serial.println("Timeout, please tap the card.");
       analogWrite(LEDG_PIN, 255);
       return;
-    } else if (!compareUID(uid, uidLength, tempuid, tempuidLength)) {
+    } 
+    //check for a different card tapped (error)
+    else if (!compareUID(uid, uidLength, tempuid, tempuidLength)) {
       Serial.println("Please tap the same card to overwrite it.");
       //throw error
       ledError();
       return;
-    } else {
+    } 
+    
+    //otherwise, place into writing mode
+    else {
       digitalWrite(LEDR_PIN, HIGH);
       analogWrite(LEDG_PIN, 100);
     }
 
+    //path for mifaire ultralight and NTAG
     if (uidLength == 7) {
       //loop for each avalible page, starts on page 4 to avoid protected area
       //creates buffer for data
@@ -174,41 +201,47 @@ void loop() {
       //checks if the card has been formatted
       success = nfc.mifareultralight_ReadPage(3, data);
       if (success) {
+        //if formatted, say so
         if (data[0] == 0xE1 && data[1] == 0x10) {
           Serial.println("Card has been formatted.");
-        } else if (data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x00 && data[3] == 0x00) {
+        } 
+        //if unformatted, format the card
+        else if (data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x00 && data[3] == 0x00) {
           Serial.println("Card will be formatted.");
           nfc.mifareultralight_WritePage(3, formattingData);
-        } else {
+        } 
+        //if improperly formatted, error
+        else {
           Serial.println("Card has been formatted incorrectly.");
           ledError();
           return;
         }
       }
 
+      //loops through user pages
       for (uint8_t i = 4; i < 35; i++) {
-        // //attempts to erase page
+        //attempts to erase page
         memset(data, 0, 4);
         success = nfc.mifareultralight_WritePage(i, data);
 
-        // // // Display the results, depending on 'success'
+        // Display the results, depending on 'success'
         if (success) {
           userPages++;
         }
+
         //catch lost connection error
         else {
           Serial.println("Unable to read the requested page!");
-          //currrently, want to abort this loop as soon as the connection is lost
-          break;
+          ledError();
+          return;
         }
       }
       Serial.flush();
 
-      //rewrites the device, using https://www. as default protocol (aka 0x02)
+      //rewrites the device, using https:// as default protocol (aka 0x04)
       char url[urlSize];
       assembleURL(url);
       Serial.println(url);
-      //uint8_t written = nfc.mifareultralight_WritePage(uint8_t page, uint8_t *data)
       uint8_t written = nfc.ntag2xx_WriteNDEFURI(0x04, url, userPages * 4);
       if (written == 1) {
         Serial.println("Successfully wrote to device.");
@@ -221,56 +254,61 @@ void loop() {
     }
 
     //different methods for mifaire classic cards
-    //IMPORTANT: This code has to reformat all cards to write to them
+    //DISCLAIMER: This code is currently not in use. However, it is left here if a smaller url is ever used
     else if (uidLength == 4) {
+      ledError();
+      return;
       //loop for each avalible page, starts on page 4 to avoid protected area
       //creates buffer for data
-      uint8_t data[16];
+    //   uint8_t data[16];
 
-      //reformat based on example code
-      success = mifaireclassic_ndeftoclassic();
+    //   //reformat based on example code
+    //   success = mifaireclassic_ndeftoclassic();
 
-      //catch error with reformatting
-      if (!success) {
-        Serial.println("Something went wrong.");
-        ledError();
-        return;
-      }
+    //   //catch error with reformatting
+    //   if (!success) {
+    //     Serial.println("Something went wrong.");
+    //     ledError();
+    //     return;
+    //   }
 
-      //for classics, authenticate first
-      Serial.println("Trying to authenticate block 4 with default KEYA value");
-      uint8_t keya[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
-      success = nfc.mifareclassic_AuthenticateBlock(uid, uidLength, 0, 0, keya);
-      if (success) {
-        Serial.flush();
+    //   //for classics, authenticate first
+    //   Serial.println("Trying to authenticate block 4 with default KEYA value");
+    //   uint8_t keya[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+    //   success = nfc.mifareclassic_AuthenticateBlock(uid, uidLength, 0, 0, keya);
+    //   if (success) {
+    //     Serial.flush();
 
-        //write to card
-        //uses https://www. as default protocol (aka 0x02)
-        char url[urlSize];
-        assembleURL(url);
-        Serial.println(url);
-        success = nfc.mifareclassic_FormatNDEF();
-        if (!success) {
-          Serial.println("Failed to reformat");
-          ledError();
-          return;
-        }
-        success = nfc.mifareclassic_AuthenticateBlock(uid, uidLength, 4, 0, keya);
-        if (!success) {
-          Serial.println("Authentication failed.");
-          ledError();
-          return;
-        }
-        uint8_t written = nfc.mifareclassic_WriteNDEFURI(1, 0x04, url);
-        if (written == 1) {
-          Serial.println("Successfully wrote to device.");
-        } else {
-          Serial.println("Error writing to card.");
-          ledError();
-          return;
-        }
-        Serial.flush();
-      }
+    //     //write to card
+    //     //uses https://www. as default protocol (aka 0x02)
+    //     char url[urlSize];
+    //     assembleURL(url);
+    //     Serial.println(url);
+    //     //firsts format into NDEF card
+    //     success = nfc.mifareclassic_FormatNDEF();
+    //     if (!success) {
+    //       Serial.println("Failed to reformat");
+    //       ledError();
+    //       return;
+    //     }
+    //     //then authenticates the block to write
+    //     success = nfc.mifareclassic_AuthenticateBlock(uid, uidLength, 4, 0, keya);
+    //     if (!success) {
+    //       Serial.println("Authentication failed.");
+    //       ledError();
+    //       return;
+    //     }
+    //     //then writes the url
+    //     uint8_t written = nfc.mifareclassic_WriteNDEFURI(1, 0x02, url);
+    //     if (written == 1) {
+    //       Serial.println("Successfully wrote to device.");
+    //     } else {
+    //       Serial.println("Error writing to card.");
+    //       ledError();
+    //       return;
+    //     }
+    //     Serial.flush();
+    //   }
     }
   }
 
@@ -311,7 +349,7 @@ void assembleURL(char* urlArray) {
   urlArray[currentPos] = 'F';
   currentPos++;
 
-  //adds a series of 6 random numbers and 6 date numbers
+  //adds a series of 6 random numbers
   while (currentPos < urlSize - 9) {
     uint8_t randAlphaNum = random(1, 63);
     if (randAlphaNum < 11) {
@@ -325,7 +363,7 @@ void assembleURL(char* urlArray) {
     currentPos++;
   }
 
-  //get current date and add it to the end
+  //get current date and add it to the end (format: YYMMDD)
   RTCTime currentTime;
   RTC.getTime(currentTime);
   uint8_t curYear = currentTime.getYear() % 100;
@@ -452,6 +490,7 @@ uint8_t mifaireclassic_ndeftoclassic() {
   return 1;
 }
 
+//method to put the LED into an error state (red) for 15 seconds
 void ledError() {
   analogWrite(LEDG_PIN, 0);
   delay(250);
@@ -463,6 +502,7 @@ void ledError() {
   analogWrite(LEDG_PIN, 255);
 }
 
+//method to put the LED into a wifi error (flashing blue) for 15 seconds
 void wifiError() {
   digitalWrite(LEDB_PIN, HIGH);
   for (uint8_t i = 0; i < 15 * 4; i++) {
@@ -472,6 +512,7 @@ void wifiError() {
   digitalWrite(LEDB_PIN, HIGH);
 }
 
+//debugging function for wifi status
 void printWifiStatus() {
   // print the SSID of the network you're attached to:
   Serial.print("SSID: ");
@@ -489,6 +530,7 @@ void printWifiStatus() {
   Serial.println(" dBm");
 }
 
+//function to connect to the given wifi setup
 uint8_t connectToWiFi() {
   // check for the WiFi module:
   if (WiFi.status() == WL_NO_MODULE) {
