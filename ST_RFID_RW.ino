@@ -100,12 +100,14 @@ void setup(void) {
   RTCTime currentTime;
   RTC.getTime(currentTime);
 
-  //Error check to make sure the data didn't get garbled (happens occasionally)
-  if (currentTime.getYear() < 2025) {
+  //Error check to make sure the data didn't get garbled (happens occasionally, for some reason unixTime will occassionally = 11)
+  if (currentTime.getYear() < 2025 || (currentTime.getYear() == 2066 && currentTime.getDayOfMonth() == 1)) {
+    digitalWrite(LEDB_PIN, LOW);
+    analogWrite(LEDG_PIN, LOW);
     ledError();
     digitalWrite(LEDR_PIN, HIGH);
     digitalWrite(LEDB_PIN, LOW);
-    digitalWrite(LEDG_PIN, LOW);
+    analogWrite(LEDG_PIN, LOW);
     while(1);
   }
 
